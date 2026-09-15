@@ -181,11 +181,22 @@
 
 <div id="stage">
   <canvas id="board"></canvas>
+  <div id="startOv" class="overlay">
+    <h2>WORD <span style="color:var(--accent)">GRID</span></h2>
+    <p>Drag (or tap) across letters to find every hidden word. Beat the clock!</p>
+    <p style="font-size:12px">Mouse / touch · P to pause</p>
+    <button class="primary" id="playBtn" style="font-size:18px;padding:12px 28px">▶ PLAY</button>
+  </div>
   <div id="overlay" class="overlay hidden">
     <h2 id="ovTitle">Solved!</h2>
     <div class="big" id="ovTime">0:00</div>
     <p id="ovSub"></p>
-    <button class="primary" id="againBtn">Play Again</button>
+    <button class="primary" id="againBtn">▶ PLAY AGAIN</button>
+  </div>
+  <div id="pauseOv" class="overlay hidden">
+    <h2>PAUSED</h2>
+    <p>Take a breath. Your timer is stopped.</p>
+    <button class="primary" id="resumeBtn">RESUME</button>
   </div>
 </div>
 
@@ -221,6 +232,10 @@
   const newBtn = document.getElementById("newBtn");
   const hintBtn = document.getElementById("hintBtn");
   const againBtn = document.getElementById("againBtn");
+  const startOv = document.getElementById("startOv");
+  const playBtn = document.getElementById("playBtn");
+  const pauseOv = document.getElementById("pauseOv");
+  const resumeBtn = document.getElementById("resumeBtn");
   const wordListEl = document.getElementById("wordList");
   const msgEl = document.getElementById("msg");
   const timerEl = document.getElementById("timer");
@@ -251,7 +266,30 @@
   let startTime = 0;
   let elapsed = 0;
   let running = false;
+  let paused = false;
   let timerId = null;
+  let pausedAt = 0;
+
+  // WebAudio cues (no files)
+  let audioCtx = null;
+  function beep(freq, dur, type, vol, when) {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const t0 = audioCtx.currentTime + (when || 0);
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type || "sine";
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(vol || 0.12, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t0); o.stop(t0 + dur);
+    } catch (e) {}
+  }
+  function sfxFound() { beep(660, .12, "triangle", .15); beep(880, .18, "triangle", .12, .08); }
+  function sfxBad() { beep(180, .15, "sawtooth", .08); }
+  function sfxWin() { [523, 659, 784, 1047].forEach((f, i) => beep(f, .22, "triangle", .14, i * .12)); }
+  function sfxClick() { beep(440, .06, "square", .05); }
   let bestKey = "";
   let bestTime = null;
 
@@ -372,9 +410,9 @@
   function layoutCanvas() {
     dpr = window.devicePixelRatio || 1;
     // choose cell size based on viewport
-    const avail = Math.min(window.innerWidth - 40, 720);
+    const avail = Math.min(window.innerWidth - 40, window.innerHeight - 260, 720);
     cell = Math.floor(avail / size);
-    cell = Math.max(28, Math.min(56, cell));
+    cell = Math.max(26, Math.min(56, cell));
     const px = cell * size;
     canvas.width = px * dpr;
     canvas.height = px * dpr;
@@ -410,9 +448,10 @@
     startTime = Date.now();
     elapsed = 0;
     running = true;
+    paused = false;
     timerEl.textContent = "0:00";
     timerId = setInterval(() => {
-      if (!running) return;
+      if (!running || paused) return;
       elapsed = Math.floor((Date.now() - startTime) / 1000);
       timerEl.textContent = fmtTime(elapsed);
     }, 250);
@@ -420,6 +459,18 @@
   function stopTimer() {
     if (timerId) { clearInterval(timerId); timerId = null; }
     running = false;
+  }
+  function pauseGame() {
+    if (!running || paused) return;
+    paused = true;
+    pausedAt = Date.now();
+    pauseOv.classList.remove("hidden");
+  }
+  function resumeGame() {
+    if (!paused) return;
+    startTime += Date.now() - pausedAt;
+    paused = false;
+    pauseOv.classList.add("hidden");
   }
 
   function cellAt(x, y) {
@@ -463,10 +514,12 @@
       const chip = wordListEl.querySelector('[data-word="' + match.word + '"]');
       if (chip) chip.classList.add("found");
       setMsg("Found " + match.word + "!", "good");
+      sfxFound();
       updateStats();
       if (foundSet.size === words.length) win();
     } else if (w.length >= 2) {
       setMsg("Not a word in this puzzle.", "bad");
+      sfxBad();
     }
     selStart = null;
     selCur = null;
@@ -485,8 +538,10 @@
     updateStats();
     ovTitle.textContent = "Solved!";
     ovTime.textContent = fmtTime(t);
-    ovSub.textContent = isNew ? "New best time for this theme & size!" : "Best: " + fmtTime(loadBest());
+    ovSub.textContent = (isNew ? "★ NEW BEST! " : "Best: " + fmtTime(loadBest()) + " · ") +
+      "Found " + foundSet.size + "/" + words.length + " words";
     overlay.classList.remove("hidden");
+    sfxWin();
   }
 
   function giveHint() {
@@ -557,7 +612,7 @@
 
   // pointer events (mouse + touch)
   function onDown(e) {
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
     const pt = e.touches ? e.touches[0] : e;
     const p = cellAt(pt.clientX, pt.clientY);
     if (!p) return;
@@ -567,7 +622,7 @@
   }
   function onMove(e) {
     if (!selStart) return;
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
     const pt = e.touches ? e.touches[0] : e;
     const p = cellAt(pt.clientX, pt.clientY);
     if (!p) return;
@@ -579,33 +634,47 @@
     tryCommit();
   }
 
-  canvas.addEventListener("mousedown", onDown);
-  canvas.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
+  canvas.addEventListener("pointerdown", onDown);
+  canvas.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  canvas.addEventListener("pointercancel", onUp);
   canvas.addEventListener("touchstart", onDown, { passive: false });
   canvas.addEventListener("touchmove", onMove, { passive: false });
   canvas.addEventListener("touchend", onUp);
 
-  newBtn.addEventListener("click", () => {
+  function startNew() {
+    startOv.classList.add("hidden");
     overlay.classList.add("hidden");
+    pauseOv.classList.add("hidden");
     generate();
-  });
+  }
+  newBtn.addEventListener("click", () => { sfxClick(); startNew(); });
   hintBtn.addEventListener("click", giveHint);
-  againBtn.addEventListener("click", () => {
-    overlay.classList.add("hidden");
-    generate();
-  });
-  themeSel.addEventListener("change", () => {
-    overlay.classList.add("hidden");
-    generate();
-  });
-  sizeSel.addEventListener("change", () => {
-    overlay.classList.add("hidden");
-    generate();
-  });
+  againBtn.addEventListener("click", () => { sfxClick(); startNew(); });
+  playBtn.addEventListener("click", () => { sfxClick(); startNew(); });
+  resumeBtn.addEventListener("click", () => { sfxClick(); resumeGame(); });
+  themeSel.addEventListener("change", () => { startNew(); });
+  sizeSel.addEventListener("change", () => { startNew(); });
   window.addEventListener("resize", () => {
     layoutCanvas();
     draw();
+  });
+  // pause on tab hidden
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) pauseGame();
+  });
+  // keyboard: P/Esc pause, Enter/Space start
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "p" || e.key === "P" || e.key === "Escape") {
+      if (!startOv.classList.contains("hidden")) return;
+      if (overlay.classList.contains("hidden") && running) {
+        if (paused) resumeGame(); else pauseGame();
+      }
+    } else if ((e.key === "Enter" || e.key === " ") && !startOv.classList.contains("hidden")) {
+      e.preventDefault();
+      sfxClick();
+      startNew();
+    }
   });
 
   generate();
